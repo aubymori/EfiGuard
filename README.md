@@ -62,6 +62,10 @@ To do this, mount the ESP at `X:` using `mountvol X: /S` and follow the steps ab
 **Note**: some very old or noncompliant firmwares may not support this method of installation at all. On these systems you will have no option but to use the loader instead.
 
 # Compilation
+## When setting up EDK2
+1. EfiGuard needs an older EDK2 version. Run `git reset --hard 934b7f5a730f69ee59144ffc264347956411c9bf` after cloning EDK2.
+2. The EDK2 repo has submodules! They don't mention it in the guide for some reason. Run `git submodule update --init --recursive` after cloning the repo and reverting to the older commit.
+
 ## Compiling EfiGuardDxe and the loader
 EfiGuard requires EDK2 to build. If you don't have EDK2 installed, follow the steps in [Getting Started with EDK2](https://github.com/tianocore/tianocore.github.io/wiki/Getting-Started-with-EDK-II) first as the EDK2 build system is fairly complex to set up. This section assumes you have a `workspace` directory that your `WORKSPACE` environment variable points to, with a copy of EDK2 checked out in `workspace/edk2`. Supported compilers are MSVC, Clang, GCC and ICC.
 1. Clone the EfiGuard repository into `workspace/edk2/EfiGuardPkg`.
