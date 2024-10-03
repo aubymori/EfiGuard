@@ -1,7 +1,11 @@
 #include "EfiGuardDxe.h"
 
 #include <Library/BaseMemoryLib.h>
+#include <Library/FileHandleLib.h>
+#include "hk.h"
 
+// Comment/uncomment to disable/enable Win2K boot style
+#define WIN2KBOOT
 
 // Global kernel patch status information.
 //
@@ -77,6 +81,36 @@ STATIC CONST UINT8 SeCodeIntegrityQueryInformationPatch[] = {
 	0xC3													// ret
 };
 
+// Replace boot bitmaps.
+STATIC CONST UINT8 SigFindBitmapResource[] = {
+	0x4C, 0x8B, 0xDC,                         // mov r11, rsp
+	0x53,                                     // push rbx
+	0x48, 0x83, 0xEC, 0x50,                   // sub rsp, 50h
+	0x48, 0x8B, 0x05, 0xCC, 0xCC, 0xCC, 0xCC  // mov rax, 0xXXXXXXXX
+};
+
+// This function sets the ShowProgressBar variable to 0. For Win2K progress bar, we need to patch it to set it to 1 instead.
+STATIC CONST UINT8 SigDisplayBootBitmap[] = {
+	0x48, 0x89, 0x5C, 0x24, 0xCC,           // mov qword ptr [rsp+X], rbx
+	0x48, 0x89, 0x74, 0x24, 0xCC,           // mov qword ptr [rsp+X], rsi
+	0x57,                                   // push rdi
+	0x48, 0x83, 0xEC, 0xCC,                 // sub rsp, XX
+	0x33, 0xDB,                             // xor, ebx ebx                <-- this is what we want to patch
+	0x40, 0x8A, 0xF9                        // mov dil, cl
+};
+
+// Patched DisplayBootBitmap that sets ShowProgressBar to 1.
+STATIC CONST UINT8 DisplayBootBitmapPatch[] = {
+	0xB3, 0x01 // mov bl, 1
+};
+
+// This function shifts the boot bitmap palette for the fade effect, notably making it use the hardcoded palette from NTOSKRNL
+// rather than the proper palette stored in the bitmap itself. This is why the XP/Vista boot bitmaps look weird in Resource Hacker,
+// they don't have proper palette data. Anyways, Win2K used the palette data from the image itself, so we need to make it do that again.
+STATIC CONST UINT8 SigFadePalette[] = {
+	0x48, 0x89, 0x5C, 0x24, 0x08,            // mov qword ptr [rsp+8], rbx
+	0x48, 0x8B, 0x05, 0xC0, 0xCC, 0xCC, 0xCC // mov rax, qword ptr [rip+0xXXXX]
+};
 
 //
 // Defuses PatchGuard initialization routines before execution is transferred to the kernel.
@@ -491,6 +525,145 @@ DisablePatchGuard(
 	return EFI_SUCCESS;
 }
 
+STATIC
+VOID
+EFIAPI
+ReadFile(
+	IN CHAR16* FileName,
+	OUT UINT8** OutBuffer,
+	OUT UINT64* OutSize
+)
+{
+	EFI_LOADED_IMAGE *LoadedImage = NULL;
+	EFI_GUID LipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+	EFI_FILE_IO_INTERFACE *IOVolume = NULL;
+	EFI_GUID FsGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+	EFI_FILE_HANDLE Volume;
+
+	gBS->HandleProtocol(gImageHandle, &LipGuid, (VOID**)&LoadedImage);
+	gBS->HandleProtocol(LoadedImage->DeviceHandle, &FsGuid, (VOID*)&IOVolume);
+	IOVolume->OpenVolume(IOVolume, &Volume);
+
+	EFI_FILE_HANDLE FileHandle;
+	Volume->Open(Volume, &FileHandle, FileName, EFI_FILE_MODE_READ, EFI_FILE_READ_ONLY | EFI_FILE_HIDDEN | EFI_FILE_SYSTEM);
+
+	EFI_FILE_INFO *FileInfo = FileHandleGetInfo(FileHandle);
+	UINT64 ReadSize = FileInfo->Size;
+	UINT8* Buffer = AllocatePool(ReadSize);
+	FreePool(FileInfo);
+	FileHandle->Read(FileHandle, &ReadSize, Buffer);
+	*OutBuffer = Buffer;
+	*OutSize = ReadSize;
+}
+
+UINT8* (NTAPI *FindBitmapResource_orig)(PVOID, ULONG_PTR);
+UINT8*
+NTAPI
+FindBitmapResource_hook(
+	IN PVOID LoaderBlock,
+	IN ULONG_PTR ResourceIdentifier
+)
+{
+	return FindBitmapResource_orig(LoaderBlock, ULONG_PTR);
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+RedirectBootBitmaps(
+	IN UINT8* ImageBase,
+	IN PEFI_IMAGE_SECTION_HEADER TextSection
+	)
+{
+	UINT32 StartRva = TextSection->VirtualAddress;
+	UINT32 SizeOfRawData = TextSection->SizeOfRawData;
+	UINT8* StartVa = ImageBase + StartRva;
+
+	PRINT_KERNEL_PATCH_MSG(L"\r\n== Searching for nt!FindBitmapResource pattern in INIT ==\r\n");
+	UINT8* FindBitmapResourcePatternAddress = NULL;
+	CONST EFI_STATUS Status = FindPattern(SigFindBitmapResource,
+											0xCC,
+											sizeof(SigFindBitmapResource),
+											StartVa,
+											SizeOfRawData,
+											(VOID**)&FindBitmapResourcePatternAddress);
+	if (EFI_ERROR(Status))
+	{
+		PRINT_KERNEL_PATCH_MSG(L"    Failed to find FindBitmapResource pattern.\r\n");
+		return EFI_NOT_FOUND;
+	}
+
+	HkDetourFunction(
+		(PVOID)FindBitmapResourcePatternAddress,
+		(PVOID)FindBitmapResource_hook,
+		15,
+		(PVOID*)&FindBitmapResource_orig
+	);
+
+	return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+EFIAPI
+EnableWin2KBoot(
+	IN UINT8* ImageBase,
+	IN PEFI_IMAGE_SECTION_HEADER TextSection
+	)
+{
+	UINT32 StartRva = TextSection->VirtualAddress;
+	UINT32 SizeOfRawData = TextSection->SizeOfRawData;
+	UINT8* StartVa = ImageBase + StartRva;
+
+	// Enable Windows 2000 progress bar
+	PRINT_KERNEL_PATCH_MSG(L"\r\n== Searching for nt!DisplayBootBitmap pattern in INIT ==\r\n");
+	UINT8* DisplayBootBitmapPatternAddress = NULL;
+	CONST EFI_STATUS DbbStatus = FindPattern(SigDisplayBootBitmap,
+											0xCC,
+											sizeof(SigDisplayBootBitmap),
+											StartVa,
+											SizeOfRawData,
+											(VOID**)&DisplayBootBitmapPatternAddress);
+	if (EFI_ERROR(DbbStatus))
+	{
+		PRINT_KERNEL_PATCH_MSG(L"    Failed to find DisplayBootBitmap pattern.\r\n");
+		return EFI_NOT_FOUND;
+	}
+	PRINT_KERNEL_PATCH_MSG(L"    Found DisplayBootBitmap pattern at 0x%llX.\r\n", (UINTN)DisplayBootBitmapPatternAddress);
+	
+	// The instruction we want to patch is 15 bytes in
+	CopyWpMem(
+		DisplayBootBitmapPatternAddress + 15,
+		DisplayBootBitmapPatch,
+		sizeof(DisplayBootBitmapPatch)
+	);
+
+	// Stop Windows XP-Vista fade effect from screwing up colors
+	PRINT_KERNEL_PATCH_MSG(L"\r\n== Searching for nt!FadePalette pattern in INIT ==\r\n");
+	UINT8* FadePalettePatternAddress = NULL;
+	CONST EFI_STATUS FpStatus = FindPattern(SigFadePalette,
+											0xCC,
+											sizeof(SigFadePalette),
+											StartVa,
+											SizeOfRawData,
+											(VOID**)&FadePalettePatternAddress);
+	if (EFI_ERROR(FpStatus))
+	{
+		PRINT_KERNEL_PATCH_MSG(L"    Failed to find FadePalette pattern.\r\n");
+		return EFI_NOT_FOUND;
+	}
+	PRINT_KERNEL_PATCH_MSG(L"    Found FadePalette pattern at 0x%llX.\r\n", (UINTN)FadePalettePatternAddress);
+
+	CONST UINT8 Ret = 0xC3;
+	CopyWpMem(
+		FadePalettePatternAddress,
+		&Ret,
+		1
+	);
+
+	return EFI_SUCCESS;
+}
+
 //
 // Disables DSE for the duration of the boot by preventing it from initializing.
 // This function is only called if DseBypassMethod is DSE_DISABLE_AT_BOOT, or if the Windows version is Vista or 7
@@ -881,6 +1054,18 @@ PatchNtoskrnl(
 								BuildNumber);
 	if (EFI_ERROR(Status))
 		return Status;
+
+#ifdef WIN2KBOOT
+	// Patch various functions to restore a Windows 2000 style boot screen
+	Status = EnableWin2KBoot(ImageBase, TextSection);
+	if (EFI_ERROR(Status))
+		return Status;
+#endif
+
+	// Redirect boot screen bitmaps
+	Status = RedirectBootBitmaps(ImageBase, TextSection);
+	if (EFI_ERROR(Status))
+		return STATUS;
 
 	PRINT_KERNEL_PATCH_MSG(L"\r\n[PatchNtoskrnl] Successfully disabled PatchGuard.\r\n");
 
