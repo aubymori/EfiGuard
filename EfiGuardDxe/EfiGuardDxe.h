@@ -16,6 +16,12 @@
 #include "arc.h"
 #include "util.h"
 
+STATIC CONST UINT8 Detour[] = {
+	0xFF, 0x25, 0x00, 0x00, 0x00, 0x00
+};
+
+#define MIN_PROLOGUE_LENGTH  sizeof(Detour) + sizeof(VOID*)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -211,6 +217,8 @@ typedef struct _KERNEL_PATCH_INFORMATION
 	UINT32 WinloadBuildNumber;	// Used to determine whether the loader block provided by winload.efi will be for Vista (or older) kernels
 	UINT32 KernelBuildNumber;	// Used to determine whether an error message should be shown
 	VOID* KernelBase;
+	UINT8 FindBitmapResource_orig[MIN_PROLOGUE_LENGTH + 15]; // i fucking love memory allocation cpu exceptions
+
 } KERNEL_PATCH_INFORMATION;
 
 extern KERNEL_PATCH_INFORMATION gKernelPatchInfo;

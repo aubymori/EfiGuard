@@ -15,6 +15,7 @@
   PatchWinload.c
   pe.c
   util.c
+  hook.c
   Zydis/src/Decoder.c
   Zydis/src/DecoderData.c
   Zydis/src/MetaInfo.c

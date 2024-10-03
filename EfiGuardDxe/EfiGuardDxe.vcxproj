@@ -46,6 +46,7 @@
     <ClCompile Include="PatchWinload.c" />
     <ClCompile Include="pe.c" />
     <ClCompile Include="util.c" />
+    <ClCompile Include="hook.c" />
     <ClCompile Include="VisualUefi.c" />
     <ClCompile Include="Zydis\src\Decoder.c" />
     <ClCompile Include="Zydis\src\DecoderData.c" />

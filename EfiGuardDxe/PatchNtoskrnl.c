@@ -2,7 +2,7 @@
 
 #include <Library/BaseMemoryLib.h>
 #include <Library/FileHandleLib.h>
-#include "hk.h"
+#include "hook.h"
 
 // Comment/uncomment to disable/enable Win2K boot style
 #define WIN2KBOOT
@@ -556,15 +556,14 @@ ReadFile(
 	*OutSize = ReadSize;
 }
 
-UINT8* (NTAPI *FindBitmapResource_orig)(PVOID, ULONG_PTR);
+UINT8* (*FindBitmapResource_orig)(VOID*, UINT64);
 UINT8*
-NTAPI
 FindBitmapResource_hook(
-	IN PVOID LoaderBlock,
-	IN ULONG_PTR ResourceIdentifier
+	VOID* LoaderBlock,
+	UINT64 ResourceIdentifier
 )
 {
-	return FindBitmapResource_orig(LoaderBlock, ULONG_PTR);
+	return FindBitmapResource_orig(LoaderBlock, ResourceIdentifier);
 }
 
 STATIC
@@ -581,7 +580,7 @@ RedirectBootBitmaps(
 
 	PRINT_KERNEL_PATCH_MSG(L"\r\n== Searching for nt!FindBitmapResource pattern in INIT ==\r\n");
 	UINT8* FindBitmapResourcePatternAddress = NULL;
-	CONST EFI_STATUS Status = FindPattern(SigFindBitmapResource,
+	EFI_STATUS Status = FindPattern(SigFindBitmapResource,
 											0xCC,
 											sizeof(SigFindBitmapResource),
 											StartVa,
@@ -593,14 +592,24 @@ RedirectBootBitmaps(
 		return EFI_NOT_FOUND;
 	}
 
-	HkDetourFunction(
-		(PVOID)FindBitmapResourcePatternAddress,
-		(PVOID)FindBitmapResource_hook,
-		15,
-		(PVOID*)&FindBitmapResource_orig
-	);
+	PRINT_KERNEL_PATCH_MSG(L"    Found FindBitmapResource pattern at 0x%llX.\r\n", (UINTN)FindBitmapResourcePatternAddress);
+	PRINT_KERNEL_PATCH_MSG(L"    FindBitmapResource_hook addr: 0x%llX\r\n", (UINTN)FindBitmapResource_hook);
 
-	return EFI_SUCCESS;
+	Status = HookFunction(
+		(VOID*)FindBitmapResourcePatternAddress,
+		(VOID*)FindBitmapResource_hook,
+		15,
+		(VOID**)&FindBitmapResource_orig
+	);
+	if (EFI_ERROR(Status))
+	{
+		PRINT_KERNEL_PATCH_MSG(L"    Failed to hook FindBitmapResource function.\r\n");
+		return Status;
+	}
+
+	// to stop the shit for debugging
+	// waitforkey kills the machine!
+	return EFI_NOT_FOUND;
 }
 
 STATIC
@@ -637,6 +646,7 @@ EnableWin2KBoot(
 		DisplayBootBitmapPatch,
 		sizeof(DisplayBootBitmapPatch)
 	);
+	PRINT_KERNEL_PATCH_MSG(L"    Patched DisplayBootBitmap.\r\n");
 
 	// Stop Windows XP-Vista fade effect from screwing up colors
 	PRINT_KERNEL_PATCH_MSG(L"\r\n== Searching for nt!FadePalette pattern in INIT ==\r\n");
@@ -660,6 +670,7 @@ EnableWin2KBoot(
 		&Ret,
 		1
 	);
+	PRINT_KERNEL_PATCH_MSG(L"    Patched FadePalette.");
 
 	return EFI_SUCCESS;
 }
@@ -1065,7 +1076,7 @@ PatchNtoskrnl(
 	// Redirect boot screen bitmaps
 	Status = RedirectBootBitmaps(ImageBase, TextSection);
 	if (EFI_ERROR(Status))
-		return STATUS;
+		return Status;
 
 	PRINT_KERNEL_PATCH_MSG(L"\r\n[PatchNtoskrnl] Successfully disabled PatchGuard.\r\n");
 
