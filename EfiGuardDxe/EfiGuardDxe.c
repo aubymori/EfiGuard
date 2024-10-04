@@ -642,6 +642,10 @@ EfiGuardInitialize(
 	gKernelPatchInfo.KernelBuildNumber = 0;
 	gKernelPatchInfo.KernelBase = NULL;
 
+	// Zero out structs.
+	SetMem64(&gKernelHooks, sizeof(gKernelHooks), 0ULL);
+	SetMem64(&gBootBitmaps, sizeof(gBootBitmaps), 0ULL);
+
 	// The ASCII banner is very pretty - ensure the user has enough time to admire it
 	RtlSleep(1500);
 

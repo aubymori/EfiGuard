@@ -16,12 +16,6 @@
 #include "arc.h"
 #include "util.h"
 
-STATIC CONST UINT8 Detour[] = {
-	0xFF, 0x25, 0x00, 0x00, 0x00, 0x00
-};
-
-#define MIN_PROLOGUE_LENGTH  sizeof(Detour) + sizeof(VOID*)
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -198,7 +192,6 @@ PatchNtoskrnl(
 	IN PEFI_IMAGE_NT_HEADERS NtHeaders
 	);
 
-
 //
 // The kernel patch result. This is used to hold data generated during
 // HookedOslFwpKernelSetupPhase1 and PatchNtoskrnl until we can safely access
@@ -217,12 +210,83 @@ typedef struct _KERNEL_PATCH_INFORMATION
 	UINT32 WinloadBuildNumber;	// Used to determine whether the loader block provided by winload.efi will be for Vista (or older) kernels
 	UINT32 KernelBuildNumber;	// Used to determine whether an error message should be shown
 	VOID* KernelBase;
-	UINT8 FindBitmapResource_orig[MIN_PROLOGUE_LENGTH + 15]; // i fucking love memory allocation cpu exceptions
 
 } KERNEL_PATCH_INFORMATION;
 
 extern KERNEL_PATCH_INFORMATION gKernelPatchInfo;
 
+// 6 is the size of FF 25 00 00 00 00.
+#define JUMP_LENGTH  6 + sizeof(VOID*)
+
+//
+// Redirection functions to call the original versions of hooked functions.
+// This needs to be allocated statically like this, because dynamic memory
+// allocation doesn't work between both modes of winload, and causes a
+// CPU exception.
+//
+// Same reason as KERNEL_PATCH_INFORMATION. See the comment above gKernelPatchInfo
+// in EfiGuardDxe.c for more information.
+//
+// Each entry should be a UINT8 array with the size JUMP_LENGTH + the size of the
+// function's prologue.
+//
+typedef struct _KERNEL_HOOKS
+{
+	// See PatchNtoskrnl.c, RedirectBootBitmaps
+	UINT8 FindBitmapResource_orig[JUMP_LENGTH + 15];
+} KERNEL_HOOKS;
+
+extern KERNEL_HOOKS gKernelHooks;
+
+//
+// Bitmaps for the boot screen.
+//
+typedef struct _BOOT_BITMAPS
+{
+	// The boot screen bitmap. Size allocated is the max size of a
+	// 640x480x24 bitmap.
+	UINT8 BootBitmap[442384];
+
+	// The progress bar bitmap. Size allocated is the max size of a
+	// 22x9x24 bitmap.
+	UINT8 ProgressBitmap[459];
+} BOOT_BITMAPS;
+
+extern BOOT_BITMAPS gBootBitmaps;
+
+typedef VOID (*RtlInitUnicodeString_t)(PUNICODE_STRING DestinationString, CONST CHAR16* SourceString);
+extern RtlInitUnicodeString_t RtlInitUnicodeString;
+
+typedef KIRQL (*KeGetCurrentIrql_t)(void);
+extern KeGetCurrentIrql_t KeGetCurrentIrql;
+
+typedef NTSTATUS (*ZwCreateFile_t)(
+	PHANDLE            FileHandle,
+	ACCESS_MASK        DesiredAccess,
+	POBJECT_ATTRIBUTES ObjectAttributes,
+	PIO_STATUS_BLOCK   IoStatusBlock,
+	PLARGE_INTEGER     AllocationSize,
+	UINT32             FileAttributes,
+	UINT32             ShareAccess,
+	UINT32             CreateDisposition,
+	UINT32             CreateOptions,
+	VOID*              EaBuffer,
+	UINT32             EaLength
+);
+extern ZwCreateFile_t ZwCreateFile;
+
+typedef NTSTATUS (*ZwReadFile_t)(
+	HANDLE FIleHandle,
+	HANDLE Event,
+	VOID* ApcRoutine,
+	VOID* ApcContext,
+	PIO_STATUS_BLOCK IoStatusBlock,
+	VOID* Buffer,
+	UINT32 Length,
+	PLARGE_INTEGER ByteOffset,
+	UINT32* Key
+);
+extern ZwReadFile_t ZwReadFile;
 
 //
 // Appends a kernel patch status info or error message to the buffer for delayed printing,

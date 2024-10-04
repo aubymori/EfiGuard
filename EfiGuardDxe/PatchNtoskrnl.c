@@ -17,6 +17,13 @@
 // because it allows the buffer to be accessed from both contexts at all stages of driver execution.
 KERNEL_PATCH_INFORMATION gKernelPatchInfo;
 
+KERNEL_HOOKS gKernelHooks;
+BOOT_BITMAPS gBootBitmaps;
+
+RtlInitUnicodeString_t RtlInitUnicodeString;
+KeGetCurrentIrql_t KeGetCurrentIrql;
+ZwCreateFile_t ZwCreateFile;
+ZwReadFile_t ZwReadFile;
 
 // Signature for nt!KeInitAmd64SpecificState
 // This function is present in all x64 kernels since Vista. It generates a #DE due to 32 bit idiv quotient overflow.
@@ -85,8 +92,12 @@ STATIC CONST UINT8 SeCodeIntegrityQueryInformationPatch[] = {
 STATIC CONST UINT8 SigFindBitmapResource[] = {
 	0x4C, 0x8B, 0xDC,                         // mov r11, rsp
 	0x53,                                     // push rbx
-	0x48, 0x83, 0xEC, 0x50,                   // sub rsp, 50h
-	0x48, 0x8B, 0x05, 0xCC, 0xCC, 0xCC, 0xCC  // mov rax, 0xXXXXXXXX
+	0x48, 0x83, 0xEC, 0xCC,                   // sub rsp, XX
+	0x48, 0x8B, 0x05, 0xCC, 0xCC, 0xCC, 0xCC, // mov rax, cs:__security_cookie
+	0x48, 0x33, 0xC4,                         // xor rax, rsp
+	0x48, 0xCC, 0xCC, 0xCC, 0xCC,             // mov XXXXXXXX, rax
+	0x49, 0xCC, 0xCC, 0xCC, 0x00,             // and qword ptr [X], 0
+	0x4D, 0x8D, 0x4B, 0xC8                    // lea r9, [r11-38h]
 };
 
 // This function sets the ShowProgressBar variable to 0. For Win2K progress bar, we need to patch it to set it to 1 instead.
@@ -525,36 +536,64 @@ DisablePatchGuard(
 	return EFI_SUCCESS;
 }
 
+#define RETURN_IF_FAILED(Status)  if (EFI_ERROR(Status)) return Status;
+
 STATIC
-VOID
+EFI_STATUS
 EFIAPI
 ReadFile(
 	IN CHAR16* FileName,
-	OUT UINT8** OutBuffer,
-	OUT UINT64* OutSize
+	IN UINT32 BufferSize,
+	OUT UINT8* Buffer
 )
 {
-	EFI_LOADED_IMAGE *LoadedImage = NULL;
-	EFI_GUID LipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
-	EFI_FILE_IO_INTERFACE *IOVolume = NULL;
-	EFI_GUID FsGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
-	EFI_FILE_HANDLE Volume;
+	UNICODE_STRING UFileName;
+	OBJECT_ATTRIBUTES FileAttrs;
+	RtlInitUnicodeString(&UFileName, FileName);
+	InitializeObjectAttributes(&FileAttrs,
+							&UFileName,
+							OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+							NULL, NULL);
+	
+	if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+	{
+		return EFI_NOT_FOUND;
+	}
 
-	gBS->HandleProtocol(gImageHandle, &LipGuid, (VOID**)&LoadedImage);
-	gBS->HandleProtocol(LoadedImage->DeviceHandle, &FsGuid, (VOID*)&IOVolume);
-	IOVolume->OpenVolume(IOVolume, &Volume);
+	HANDLE FileHandle;
+	IO_STATUS_BLOCK StatusBlock;
+	NTSTATUS Status = ZwCreateFile(&FileHandle,
+								GENERIC_READ,
+								&FileAttrs, &StatusBlock,
+								NULL,
+								FILE_ATTRIBUTE_NORMAL,
+								0,
+								FILE_OPEN,
+								FILE_SYNCHRONOUS_IO_NONALERT,
+								NULL, 0);
+	if (!NT_SUCCESS(Status))
+	{
+		return EFI_NOT_FOUND;
+	}
 
-	EFI_FILE_HANDLE FileHandle;
-	Volume->Open(Volume, &FileHandle, FileName, EFI_FILE_MODE_READ, EFI_FILE_READ_ONLY | EFI_FILE_HIDDEN | EFI_FILE_SYSTEM);
+	LARGE_INTEGER ByteOffset;
+	ByteOffset.u.LowPart = ByteOffset.u.HighPart = 0;
+	Status = ZwReadFile(FileHandle,
+						NULL, NULL, NULL,
+						&StatusBlock,
+						Buffer,
+						BufferSize,
+						&ByteOffset,
+						NULL);
+	if (!NT_SUCCESS(Status))
+	{
+		return EFI_NOT_FOUND;
+	}
 
-	EFI_FILE_INFO *FileInfo = FileHandleGetInfo(FileHandle);
-	UINT64 ReadSize = FileInfo->Size;
-	UINT8* Buffer = AllocatePool(ReadSize);
-	FreePool(FileInfo);
-	FileHandle->Read(FileHandle, &ReadSize, Buffer);
-	*OutBuffer = Buffer;
-	*OutSize = ReadSize;
+	return EFI_SUCCESS;
 }
+
+STATIC CONST UINT8 Ret = 0xC3;
 
 UINT8* (*FindBitmapResource_orig)(VOID*, UINT64);
 UINT8*
@@ -563,7 +602,25 @@ FindBitmapResource_hook(
 	UINT64 ResourceIdentifier
 )
 {
-	return FindBitmapResource_orig(LoaderBlock, ResourceIdentifier);
+	return 0;
+	// switch (ResourceIdentifier)
+	// {
+	// 	case 1:
+	// 		// If we haven't, load the bitmap
+	// 		if (!gBootBitmaps.BootBitmap[0])
+	// 		{
+	// 			ReadFile(L"\\SystemRoot\\boot.bmp",
+	// 					sizeof(gBootBitmaps.BootBitmap),
+	// 					gBootBitmaps.BootBitmap);
+	// 		}
+	// 		// Give it if it exists
+	// 		if (gBootBitmaps.BootBitmap[0])
+	// 		{
+	// 			return gBootBitmaps.BootBitmap;
+	// 		}
+	// 		break;
+	// }
+	// return FindBitmapResource_orig(LoaderBlock, ResourceIdentifier);
 }
 
 STATIC
@@ -571,11 +628,12 @@ EFI_STATUS
 EFIAPI
 RedirectBootBitmaps(
 	IN UINT8* ImageBase,
-	IN PEFI_IMAGE_SECTION_HEADER TextSection
+	IN PEFI_IMAGE_SECTION_HEADER InitSection
 	)
 {
-	UINT32 StartRva = TextSection->VirtualAddress;
-	UINT32 SizeOfRawData = TextSection->SizeOfRawData;
+
+	UINT32 StartRva = InitSection->VirtualAddress;
+	UINT32 SizeOfRawData = InitSection->SizeOfRawData;
 	UINT8* StartVa = ImageBase + StartRva;
 
 	PRINT_KERNEL_PATCH_MSG(L"\r\n== Searching for nt!FindBitmapResource pattern in INIT ==\r\n");
@@ -599,13 +657,15 @@ RedirectBootBitmaps(
 		(VOID*)FindBitmapResourcePatternAddress,
 		(VOID*)FindBitmapResource_hook,
 		15,
-		(VOID**)&FindBitmapResource_orig
+		(VOID*)gKernelHooks.FindBitmapResource_orig
 	);
 	if (EFI_ERROR(Status))
 	{
 		PRINT_KERNEL_PATCH_MSG(L"    Failed to hook FindBitmapResource function.\r\n");
 		return Status;
 	}
+	*(VOID**)&FindBitmapResource_orig = gKernelHooks.FindBitmapResource_orig;
+	PRINT_KERNEL_PATCH_MSG(L"    Hooked FindBitmapResource function.\r\n");
 
 	// to stop the shit for debugging
 	// waitforkey kills the machine!
@@ -648,6 +708,7 @@ EnableWin2KBoot(
 	);
 	PRINT_KERNEL_PATCH_MSG(L"    Patched DisplayBootBitmap.\r\n");
 
+#if 0
 	// Stop Windows XP-Vista fade effect from screwing up colors
 	PRINT_KERNEL_PATCH_MSG(L"\r\n== Searching for nt!FadePalette pattern in INIT ==\r\n");
 	UINT8* FadePalettePatternAddress = NULL;
@@ -671,6 +732,7 @@ EnableWin2KBoot(
 		1
 	);
 	PRINT_KERNEL_PATCH_MSG(L"    Patched FadePalette.");
+#endif
 
 	return EFI_SUCCESS;
 }
@@ -991,6 +1053,20 @@ DisableDSE(
 	return EFI_SUCCESS;
 }
 
+#define LOAD_NTKRNL_FUNC(FUNC)                                                \
+	PRINT_KERNEL_PATCH_MSG(L"    " #FUNC "...");                              \
+	FUNC = NULL;                                                              \
+	*(VOID**)&FUNC = GetProcedureAddress((UINTN)ImageBase, NtHeaders, #FUNC); \
+	if (FUNC)                                                                 \
+	{                                                                         \
+		PRINT_KERNEL_PATCH_MSG(L"OK.\r\n");                                   \
+	}                                                                         \
+	else                                                                      \
+	{                                                                         \
+		PRINT_KERNEL_PATCH_MSG(L"failed.\r\n");                               \
+		return EFI_NOT_FOUND;                                                 \
+	}                                                                         \
+
 //
 // Patches ntoskrnl.exe
 //
@@ -1002,6 +1078,12 @@ PatchNtoskrnl(
 	)
 {
 	PRINT_KERNEL_PATCH_MSG(L"[PatchNtoskrnl] ntoskrnl.exe at 0x%llX, size 0x%llX\r\n", (UINTN)ImageBase, (UINTN)NtHeaders->OptionalHeader.SizeOfImage);
+
+	PRINT_KERNEL_PATCH_MSG(L"[PatchNtoskrnl] Loading ntoskrnl.exe functions\r\n");
+	LOAD_NTKRNL_FUNC(RtlInitUnicodeString);
+	LOAD_NTKRNL_FUNC(KeGetCurrentIrql);
+	LOAD_NTKRNL_FUNC(ZwCreateFile);
+	LOAD_NTKRNL_FUNC(ZwReadFile);
 
 	// Print file and version info
 	UINT16 MajorVersion = 0, MinorVersion = 0, BuildNumber = 0, Revision = 0;
@@ -1074,7 +1156,7 @@ PatchNtoskrnl(
 #endif
 
 	// Redirect boot screen bitmaps
-	Status = RedirectBootBitmaps(ImageBase, TextSection);
+	Status = RedirectBootBitmaps(ImageBase, InitSection);
 	if (EFI_ERROR(Status))
 		return Status;
 
