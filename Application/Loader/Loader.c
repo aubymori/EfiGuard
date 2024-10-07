@@ -373,7 +373,7 @@ StartEfiGuard(
 		// Interactive driver configuration
 		//
 		Print(L"\r\nChoose the type of DSE bypass to use, or press ENTER for default:\r\n"
-			L"    [1] Runtime SetVariable hook (default)\r\n    [2] Boot time DSE bypass\r\n    [3] No DSE bypass\r\n    ");
+			L"    [1] Boot time DSE bypass (default)\r\n    [2] Runtime SetVariable hook\r\n    [3] No DSE bypass\r\n    ");
 		CONST UINT16 AcceptedDseBypasses[] = { L'1', L'2', L'3' };
 		CONST UINT16 SelectedDseBypass = PromptInput(AcceptedDseBypasses,
 													sizeof(AcceptedDseBypasses) / sizeof(UINT16),
@@ -391,10 +391,10 @@ StartEfiGuard(
 		{
 		case L'1':
 		default:
-			ConfigData.DseBypassMethod = DSE_DISABLE_SETVARIABLE_HOOK;
+			ConfigData.DseBypassMethod = DSE_DISABLE_AT_BOOT;
 			break;
 		case L'2':
-			ConfigData.DseBypassMethod = DSE_DISABLE_AT_BOOT;
+			ConfigData.DseBypassMethod = DSE_DISABLE_SETVARIABLE_HOOK;
 			break;
 		case L'3':
 			ConfigData.DseBypassMethod = DSE_DISABLE_NONE;

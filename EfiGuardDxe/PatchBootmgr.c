@@ -363,7 +363,7 @@ Exit:
 	else
 	{
 		Print(L"Successfully patched %S!%S.\r\n", ShortFileName, FunctionName);
-		RtlSleep(2000);
+		//RtlSleep(2000);
 
 		if (gDriverConfig.WaitForKeyPress)
 		{

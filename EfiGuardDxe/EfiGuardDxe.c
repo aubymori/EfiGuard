@@ -166,7 +166,7 @@ HookedLoadImage(
 		(IsBoot ? L"Booting" : L"Loading"), ImagePath, (UINTN)ParentImageHandle);
 	if (ImagePath != NULL)
 		FreePool(ImagePath);
-	RtlSleep(500);
+	//RtlSleep(500);
 
 	// Q: If we loaded bootmgfw.efi manually, is there any benefit to flipping BootPolicy to TRUE
 	// to make it look like the load request came straight from the boot manager?
@@ -643,7 +643,8 @@ EfiGuardInitialize(
 	gKernelPatchInfo.KernelBase = NULL;
 
 	// The ASCII banner is very pretty - ensure the user has enough time to admire it
-	RtlSleep(1500);
+	// how about no
+	//RtlSleep(1500);
 
 Exit:
 	if (EFI_ERROR(Status))

@@ -767,7 +767,7 @@ Exit:
 	else
 	{
 		Print(L"Successfully patched winload!OslFwpKernelSetupPhase1.\r\n");
-		RtlSleep(2000);
+		//RtlSleep(2000);
 
 		if (gDriverConfig.WaitForKeyPress)
 		{
